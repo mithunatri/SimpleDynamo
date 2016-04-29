@@ -49,6 +49,16 @@ public class SimpleDynamoProvider extends ContentProvider {
     String node_Id;
     String portStr;
 
+    public String getClientResponse() {
+        Log.d(TAG,"Requesting client response");
+        return clientResponse;
+    }
+
+    public void setClientResponse(String clientResponse) {
+        this.clientResponse = clientResponse;
+        Log.d(TAG,"Client response set");
+    }
+
     String clientResponse;
     String waitingOnKey = null;
     Semaphore sema = new Semaphore(0, true);
@@ -72,7 +82,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
         else if(key.equals("@")){
             fileList = getContext().fileList();
-        }   
+        }
         else{
             if(parts.length == 1)
                 storageNode = determineStorageNode(key, "");
@@ -116,9 +126,10 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         sema_acquire(sema);
 
-        if(clientResponse.isEmpty())  return -1;
+        String response = getClientResponse();
+        if (response.isEmpty()) return 0;
 
-        int deleteReplicaRows = Integer.parseInt(clientResponse);
+        int deleteReplicaRows = Integer.parseInt(response);
         //Release response sema?
         return deleteReplicaRows;
     }
@@ -134,14 +145,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         if(replicaCount > 0) {
             Log.d(TAG, "Replication Count: " + replicaCount);
-            new ClientTask2().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, replicaNodePort,
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, replicaNodePort,
                     "RDELETE", content);
 
             //sema_acquire(sema);
         }
-        if (clientResponse.isEmpty()) return 0;
 
-        int deleteReplicaRows = Integer.parseInt(clientResponse);
+        String response = getClientResponse();
+        if (response.isEmpty()) return 0;
+
+        int deleteReplicaRows = Integer.parseInt(response);
         //Release response sema?
         return deleteReplicaRows;
     }
@@ -169,7 +182,6 @@ public class SimpleDynamoProvider extends ContentProvider {
     /**
      * Performs the delete operation for "*".
      * @param uri
-     * @param originPort
      * @return number of rows affected
      */
     private String gdumpDel(Uri uri){
@@ -185,9 +197,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                                                         nodeToQuery, "DELETE", "@");
 
             sema_acquire(sema);
-            Log.d(TAG, "gDumpDel response from AVD " + node + " :" + clientResponse);
-            if(!clientResponse.isEmpty())
-                gDumpResponse += Integer.valueOf(clientResponse);
+            String response = getClientResponse();
+            Log.d(TAG, "gDumpDel response from AVD " + node + " :" + response);
+            if(!response.isEmpty())
+                gDumpResponse += Integer.valueOf(response);
         }
 
         if(gDumpResponse == 0)
@@ -275,6 +288,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
 
     public void insertToFs(String key, String value){
+        Log.d(TAG,"Inside insertToFS");
         FileOutputStream file;
 
         try {
@@ -377,10 +391,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                                                 convertToPort(nodeToQuery), "QUERY", selection);
 
         sema_acquire(sema);
+        String response = getClientResponse();
+        if(response.isEmpty())  return null;
 
-        if(clientResponse.isEmpty())  return null;
-
-        Cursor cursor = createCursor(clientResponse);
+        Cursor cursor = createCursor(response);
         return cursor;
     }
 
@@ -413,9 +427,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                                                         nodeToQuery, "QUERY", "@");
 
             sema_acquire(sema);
-            Log.d(TAG, "gDump response from AVD " + node + " :" + clientResponse);
-            if(!clientResponse.isEmpty())
-                gDumpResponse += clientResponse + ";";
+            String response = getClientResponse();
+            Log.d(TAG, "gDump response from AVD " + node + " :" + response);
+            if(!response.isEmpty())
+                gDumpResponse += response + ";";
             //Release response Sema?
         }
 
@@ -435,7 +450,7 @@ public class SimpleDynamoProvider extends ContentProvider {
      * @param response
      * @return
      */
-    private Cursor createCursor(String response){
+    private synchronized Cursor createCursor(String response){
         Log.d(TAG,"Creating cursor for:"  + response);
         String[] keyValuePairs = response.split(";");
 
@@ -813,7 +828,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                     Log.d(TAG,"Insert and Replicate should not enter this block.");
                     String response = in.readUTF();
                     Log.d(TAG, "Response received from Port: " + node + " Response: " + response);
-                    clientResponse = response;
+                    setClientResponse(response);
+                    Log.d(TAG,"Releasing semaphore");
                     sema.release();
                 }
             }catch(IOException e){

@@ -207,7 +207,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             return String.valueOf(selfRowsAffected);
 
         int totalRowsAffected = selfRowsAffected + gDumpResponse;
-
+        Log.d(TAG,"Total rows affected:" + totalRowsAffected);
         return String.valueOf(totalRowsAffected);
     }
 

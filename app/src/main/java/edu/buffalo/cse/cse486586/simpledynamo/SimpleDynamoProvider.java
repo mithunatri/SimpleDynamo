@@ -20,6 +20,7 @@ import java.util.Formatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
 import android.content.ContentProvider;
@@ -33,6 +34,8 @@ import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 
+import junit.framework.Assert;
+
 public class SimpleDynamoProvider extends ContentProvider {
 
     static final String TAG = SimpleDynamoProvider.class.getSimpleName();
@@ -43,26 +46,13 @@ public class SimpleDynamoProvider extends ContentProvider {
     private Map<String, Integer> msgType;
     private static ArrayList<String> node_hash_ring;
     private static ArrayList<String> node_ring;
+    private static ConcurrentHashMap<String, Response> response_map;
+    private static ConcurrentHashMap<String, Semaphore> query_block_map;
 
     int REPLICATION_FACTOR = 3;
     String[] columnNames = {KEY_FIELD,VALUE_FIELD};
     String node_Id;
     String portStr;
-
-    public String getClientResponse() {
-        Log.d(TAG,"Requesting client response");
-        return clientResponse;
-    }
-
-    public void setClientResponse(String clientResponse) {
-        this.clientResponse = clientResponse;
-        Log.d(TAG,"Client response set");
-    }
-
-    String clientResponse;
-    String waitingOnKey = null;
-    Semaphore sema = new Semaphore(0, true);
-    Semaphore query_sema = new Semaphore(0,true);
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -100,7 +90,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         for(String file:fileList){
             try {
-                if (getContext().deleteFile(file))
+                File fileToDelete = new File(getContext().getFilesDir(),file);
+                Log.d(TAG,"File to Delete: " + fileToDelete.getName());
+                if (getContext().deleteFile(fileToDelete.getName()))
                     numberOfRows++;
                 else
                     throw new RuntimeException("Delete of file " + file + " failed");
@@ -121,12 +113,14 @@ public class SimpleDynamoProvider extends ContentProvider {
      */
     private int transferDelete(String key, String storageNode){
         String nodeToQuery = convertToPort(storageNode);
-        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
+        /*new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
                                                 nodeToQuery, "DELETE", key);
 
         sema_acquire(sema);
 
-        String response = getClientResponse();
+        String response = getClientResponse();*/
+        Client client = new Client();
+        String response = client.send(nodeToQuery,"DELETE",key);
         if (response.isEmpty()) return 0;
 
         int deleteReplicaRows = Integer.parseInt(response);
@@ -139,19 +133,20 @@ public class SimpleDynamoProvider extends ContentProvider {
         int myNodeIndex = node_ring.indexOf(portStr);
         int replicaNodeIndex =  (myNodeIndex + 1) % node_ring.size();
         String replicaNodePort = convertToPort(node_ring.get(replicaNodeIndex));
-        clientResponse = "";
-        --replicaCount;
-        String content = key + "," + String.valueOf(replicaCount);
+        //clientResponse = "";
 
-        if(replicaCount > 0) {
+        String response = "";
+        if(--replicaCount > 0) {
             Log.d(TAG, "Replication Count: " + replicaCount);
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, replicaNodePort,
-                    "RDELETE", content);
+            /*new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, replicaNodePort,
+                    "RDELETE", content);*/
 
             //sema_acquire(sema);
+            Client client = new Client();
+            response = client.send(replicaNodePort,"RDELETE",key + "," + String.valueOf(replicaCount));
         }
 
-        String response = getClientResponse();
+       // String response = getClientResponse();
         if (response.isEmpty()) return 0;
 
         int deleteReplicaRows = Integer.parseInt(response);
@@ -164,7 +159,9 @@ public class SimpleDynamoProvider extends ContentProvider {
         int numberOfRows = 0;
 
         try {
-            if (getContext().deleteFile(key))
+            File fileToDelete = new File(getContext().getFilesDir(),key);
+            Log.d(TAG,"File to Delete: " + fileToDelete.getName());
+            if (getContext().deleteFile(fileToDelete.getName()))
                 numberOfRows++;
             else
                 throw new RuntimeException("Delete of file " + key + " failed");
@@ -193,11 +190,13 @@ public class SimpleDynamoProvider extends ContentProvider {
         for (String node: node_ring){
             if(node.equals(portStr)) continue;
             String nodeToQuery = convertToPort(node);
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
+          /*  new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
                                                         nodeToQuery, "DELETE", "@");
 
             sema_acquire(sema);
-            String response = getClientResponse();
+            String response = getClientResponse();*/
+            Client client = new Client();
+            String response = client.send(nodeToQuery, "DELETE", "@");
             Log.d(TAG, "gDumpDel response from AVD " + node + " :" + response);
             if(!response.isEmpty())
                 gDumpResponse += Integer.valueOf(response);
@@ -248,6 +247,11 @@ public class SimpleDynamoProvider extends ContentProvider {
             String node = convertToPort(storageNode);
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
                                                         node, "INSERT", message);
+            try{
+                Thread.sleep(1000);
+            }catch(InterruptedException e){
+                e.printStackTrace();
+            }
         }
 
         return uri;
@@ -265,7 +269,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         int replicaIndex = (myNodeIndex + 1) % nodeRing_length;
         String replicaPort = convertToPort(node_ring.get(replicaIndex));
 
-        Log.d(TAG, "Replicate Key-Value pair to AVD: " + Integer.parseInt(replicaPort) / 2);
+        Log.d(TAG, "Replicate Key-Value pair: " + key + "-" + value +
+                                            " to AVD: " + Integer.parseInt(replicaPort) / 2);
 
         if (--replicaCount > 0) {
             Log.d(TAG,"Replica count is: " + replicaCount);
@@ -273,6 +278,11 @@ public class SimpleDynamoProvider extends ContentProvider {
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
                                             replicaPort, "REPLICATE", message);
 
+            try{
+                Thread.sleep(1000);
+            }catch(InterruptedException e){
+                e.printStackTrace();
+            }
             //sema_acquire();
         }
     }
@@ -288,7 +298,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
 
     public void insertToFs(String key, String value){
-        Log.d(TAG,"Inside insertToFS");
+        Log.d(TAG, "Inside insertToFS");
         FileOutputStream file;
 
         try {
@@ -299,9 +309,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.e("insert", e.getMessage());
             e.printStackTrace();
         }
-        if(key.equals(waitingOnKey)){
-            waitingOnKey = null;
-            query_sema.release();
+        if(query_block_map.contains(key)){
+            query_block_map.get(key).release();
+            query_block_map.remove(key);
         }
         Log.v("insert", key + "," + value);
     }
@@ -328,7 +338,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 storageNode = determineStorageNode(key, "");
                 Log.d(TAG, "Storage node for Key-value pair is: " + storageNode);
                 String readNode = determineReadNode(storageNode);
-                Log.d(TAG,"Query read node: " + readNode);
+                Log.d(TAG, "Query read node: " + readNode);
                 if(!readNode.equals(portStr))
                     return transferQuery(key, readNode);
             }
@@ -358,12 +368,12 @@ public class SimpleDynamoProvider extends ContentProvider {
                 builder.add(KEY_FIELD, files);
                 builder.add(VALUE_FIELD, value);
             }
-            Log.d(TAG,"Query Done.");
+            Log.d(TAG,"Query Done for " + selection);
             return cursor;
         } catch (Exception e) {
             Log.v("query", e.getMessage());
         }
-        Log.d(TAG,"Don't come here!");
+        Log.d(TAG, "Don't come here!");
         return null;
 	}
 
@@ -375,27 +385,10 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
 
     private void blockTillInsert(String key){
-        waitingOnKey = key;
-        sema_acquire(query_sema);
-    }
-
-    /**
-     * Transfer query to appropriate node and return Cursor.
-     * @param selection
-     * @param nodeToQuery
-     * @return
-     */
-    private Cursor transferQuery(String selection, String nodeToQuery){
-
-        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
-                                                convertToPort(nodeToQuery), "QUERY", selection);
-
-        sema_acquire(sema);
-        String response = getClientResponse();
-        if(response.isEmpty())  return null;
-
-        Cursor cursor = createCursor(response);
-        return cursor;
+        Semaphore block_sema = new Semaphore(0);
+        query_block_map.put(key, block_sema);
+        //waitingOnKey = key;
+        sema_acquire(query_block_map.get(key));
     }
 
     private String determineReadNode(String storageNode){
@@ -408,6 +401,35 @@ public class SimpleDynamoProvider extends ContentProvider {
             return portStr;
 
         return nodeToQuery;
+    }
+
+
+    /**
+     * Transfer query to appropriate node and return Cursor.
+     * @param selection
+     * @param nodeToQuery
+     * @return
+     */
+    private Cursor transferQuery(String selection, String nodeToQuery){
+
+        Semaphore response_wait = new Semaphore(0);
+        Response response_obj = new Response(null,response_wait);
+        response_map.put(selection, response_obj);
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
+                convertToPort(nodeToQuery), "QUERY", selection);
+
+        sema_acquire(response_obj.sema);
+        String response = response_obj.message;
+        Log.d(TAG,"response for key: " + selection + " from Client Task: " + response);
+        response_map.remove(selection);
+        /*Client client = new Client();
+        String response = client.send(convertToPort(nodeToQuery), "QUERY", selection);*/
+
+        if(response == null || response.isEmpty())  return null;
+
+        Cursor cursor = createCursor(response);
+        Log.d(TAG,"Query done for " + selection);
+        return cursor;
     }
 
     /**
@@ -423,11 +445,18 @@ public class SimpleDynamoProvider extends ContentProvider {
         for (String node: node_ring){
             if(node.equals(portStr)) continue;
             String nodeToQuery = convertToPort(node);
+
+            Semaphore response_wait = new Semaphore(0);
+            Response response_obj = new Response(null,response_wait);
+            response_map.put("@", response_obj);
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
                                                         nodeToQuery, "QUERY", "@");
 
-            sema_acquire(sema);
-            String response = getClientResponse();
+            sema_acquire(response_obj.sema);
+            String response = response_obj.message;
+            response_map.remove("@");
+            /*Client client = new Client();
+            String response = client.send(nodeToQuery, "QUERY", "@");*/
             Log.d(TAG, "gDump response from AVD " + node + " :" + response);
             if(!response.isEmpty())
                 gDumpResponse += response + ";";
@@ -450,7 +479,7 @@ public class SimpleDynamoProvider extends ContentProvider {
      * @param response
      * @return
      */
-    private synchronized Cursor createCursor(String response){
+    private Cursor createCursor(String response){
         Log.d(TAG,"Creating cursor for:"  + response);
         String[] keyValuePairs = response.split(";");
 
@@ -487,7 +516,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             for(int i=0; i < nodeRing_length; i++){
                 int prevNodeIndex = i;
                 int succNodeIndex = (prevNodeIndex + 1) % nodeRing_length;
-                Log.d(TAG, "Determine Storage Node:  " + node_ring.get(i));
+                //Log.d(TAG, "Determine Storage Node:  " + node_ring.get(i));
                 if(succNodeIndex == 0 &&
                         hashKey.compareTo(node_hash_ring.get(prevNodeIndex)) > 0) {
                     Log.d(TAG,"Last node condition");
@@ -530,7 +559,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         }catch(NoSuchAlgorithmException e){
             e.printStackTrace();
         }
-
+        response_map = new ConcurrentHashMap<String, Response>();
+        query_block_map = new ConcurrentHashMap<String, Semaphore>();
         Log.d(TAG, "Starting server task...");
         try{
             ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
@@ -625,8 +655,10 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
 
         private void createNewThread(Socket socket){
-            new Task().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, socket);
+            //new Task().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, socket);
             //task(socket);
+            Thread t = new Thread(new Task(socket));
+            t.start();
         }
 
         private void assignMsgTypes() {
@@ -644,17 +676,24 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 
     //#--------------------------------------------------------------------------------------------#
-    public class Task extends AsyncTask<Socket, Void, Void>{
+    //public class Task extends AsyncTask<Socket, Void, Void>{
+    public class Task implements Runnable{
 
-        public Task(){
+        Socket socket;
+
+        public Task(Socket socket){
             Log.d(TAG,"Task Created..");
+            this.socket = socket;
         }
 
-        @Override
-        protected Void doInBackground(Socket... sockets){
+        //@Override
+        //protected Void doInBackground(Socket... sockets){
         //private void task(Socket socket){
+        @Override
+        public void run(){
+            Log.d(TAG,"Task starting...");
             try {
-                Socket socket = sockets[0];
+                //Socket socket = sockets[0];
                 DataInputStream reader = new DataInputStream(socket.getInputStream());
                 String incomingMsg = reader.readUTF();
 
@@ -696,7 +735,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 Log.e(TAG, "IOException. Reason: " + e.getLocalizedMessage());
             }
             Log.d(TAG,"Task Exiting...");
-            return null;
+            //return null;
         }
 
         private String queryRequest(String incomingReq){
@@ -809,12 +848,12 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.d(TAG,"Within Client send message..");
             String node = message[0];
             String msgType = message[1].trim();
-            String finalMessage = msgType + "|" + message[2];
+            String key = message[2].trim().split(",")[0];
+            String finalMessage = msgType + "|" + message[2] + "|" + portStr;
 
             Log.d(TAG,"Final Message to be sent: " + finalMessage + " to Port:" + node);
-            Log.d(TAG, "Message Type: " + msgType);
             Socket socket = null;
-            clientResponse = "";
+            //clientResponse = "";
             try {
                 socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
                         Integer.parseInt(node));
@@ -825,12 +864,13 @@ public class SimpleDynamoProvider extends ContentProvider {
                 out.writeUTF(finalMessage);
 
                 if(!msgType.equals("INSERT") && !msgType.equals("REPLICATE")) {
-                    Log.d(TAG,"Insert and Replicate should not enter this block.");
                     String response = in.readUTF();
-                    Log.d(TAG, "Response received from Port: " + node + " Response: " + response);
-                    setClientResponse(response);
+                    //Assert.assertNotNull(response);
+                    Log.d(TAG, "Response received from Port: " + node + " For key: " + key +
+                            "  Response: " + response);
+                    response_map.get(key).setMessage(response);
                     Log.d(TAG,"Releasing semaphore");
-                    sema.release();
+                    response_map.get(key).sema.release();
                 }
             }catch(IOException e){
                 Log.e(TAG, "IOException while delivering message. Reason: " +
@@ -849,83 +889,61 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
     }
 
-    public class ClientTask2 extends AsyncTask<String, Void, Void>{
 
-        public ClientTask2(){
-            Log.d(TAG,"Client Task2 Created");
-        }
 
-        @Override
-        protected Void doInBackground(String... message) {
+   public class Client{
 
-            Log.d(TAG,"Within Client send message..");
-            String node = message[0];
-            String msgType = message[1].trim();
-            String finalMessage = msgType + "|" + message[2];
+       public String send(String node, String msgType, String content){
 
-            Log.d(TAG,"Final Message to be sent: " + finalMessage + " to Port:" + node);
-            Log.d(TAG, "Message Type: " + msgType);
-            Socket socket = null;
-            clientResponse = "";
-            try {
-                socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                        Integer.parseInt(node));
+           Log.d(TAG,"Within Client send message (method)..");
+           String finalMessage = msgType + "|" + content;
 
-                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-                DataInputStream in = new DataInputStream(socket.getInputStream());
+           Log.d(TAG,"Final Message to be sent: " + finalMessage);
+           Log.d(TAG, "Message Type: " + msgType);
+           Socket socket = null;
 
-                out.writeUTF(finalMessage);
+           try {
+               socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                       Integer.parseInt(node));
 
-                if(!msgType.equals("INSERT") && !msgType.equals("REPLICATE")) {
-                    Log.d(TAG,"Insert and Replicate should not enter this block.");
-                    String response = in.readUTF();
-                    Log.d(TAG, "Response received from Port: " + node + " Response: " + response);
-                    clientResponse = response;
-                    sema.release();
-                }
-            }catch(IOException e){
-                Log.e(TAG, "IOException while delivering message. Reason: " +
-                        e.getLocalizedMessage());
-                e.printStackTrace();
-            }finally{
-                try{
-                    socket.close();
-                    Log.d(TAG,"Client task2 closing..");
-                }catch(Exception e){
-                    e.printStackTrace();
-                }
-            }
+               DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+               DataInputStream in = new DataInputStream(socket.getInputStream());
 
-            return null;
-        }
-    }
-   /*public String send(String node, String msgType, String content){
+               out.writeUTF(finalMessage);
 
-       Log.d(TAG,"Within Client send message..");
-       String finalMessage = msgType + "|" + content;
-       Log.d(TAG,"Final Message to be sent: " + finalMessage);
-       String response = null;
+               String response = in.readUTF();
+               Log.d(TAG,"Response received from Port: " + node + " Response: " + response);
 
-       try {
-           Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                   Integer.parseInt(node));
+               return response;
 
-           DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-           DataInputStream in = new DataInputStream(socket.getInputStream());
+           }catch(IOException e){
+               Log.e(TAG, "IOException while delivering message. Reason: " + e.getLocalizedMessage());
+               e.printStackTrace();
+           }finally {
+               try {
+                   socket.close();
+                   Log.d(TAG, "Client method done..");
+               } catch (Exception e) {
+                   e.printStackTrace();
+               }
+           }
 
-           out.writeUTF(finalMessage);
+           return null;
+       }
+   }
 
-           String response = in.readUTF();
-           Log.d(TAG,"Response received from Port: " + node + " Response: " + response);
-           if(!msgType.equals("INSERT") || !msgType.equals("REPLICATE"))
-                    clientResponse = response;
+   public class Response{
+       String message;
+       Semaphore sema;
 
-       }catch(IOException e){
-           Log.e(TAG, "IOException while delivering message. Reason: " + e.getLocalizedMessage());
-           e.printStackTrace();
+       public Response(String message, Semaphore sema){
+           this.message = message;
+           this.sema = sema;
        }
 
-       return response;
+       public void setMessage(String message){
+           this.message = message;
+       }
    }
-*/
+
 }

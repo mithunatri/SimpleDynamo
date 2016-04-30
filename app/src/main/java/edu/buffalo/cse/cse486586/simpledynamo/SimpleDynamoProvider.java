@@ -245,13 +245,16 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.d(TAG," Ready to forward the request");
             String message = key + "," + value;
             String node = convertToPort(storageNode);
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
-                                                        node, "INSERT", message);
-            try{
+            /*new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
+                                                        node, "INSERT", message);*/
+
+            Client client = new Client();
+            String response = client.send(node,"INSERT",message);
+            /*try{
                 Thread.sleep(1000);
             }catch(InterruptedException e){
                 e.printStackTrace();
-            }
+            }*/
         }
 
         return uri;
@@ -273,28 +276,28 @@ public class SimpleDynamoProvider extends ContentProvider {
                                             " to AVD: " + Integer.parseInt(replicaPort) / 2);
 
         if (--replicaCount > 0) {
-            Log.d(TAG,"Replica count is: " + replicaCount);
+            Log.d(TAG, "Replica count is: " + replicaCount);
             String message = key + "," + value + "," + String.valueOf(replicaCount);
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
-                                            replicaPort, "REPLICATE", message);
-
-            try{
+            /*new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
+                                            replicaPort, "REPLICATE", message);*/
+            Client client = new Client();
+            String response = client.send(replicaPort,"REPLICATE",message);
+            /*try{
                 Thread.sleep(1000);
             }catch(InterruptedException e){
                 e.printStackTrace();
-            }
-            //sema_acquire();
+            }*/
         }
     }
 
-    public void replicateInsert(String key, String value, int replicateCount){
+    public String replicateInsert(String key, String value, int replicateCount){
         insertToFs(key, value);
         Log.d(TAG, "Replica insert done on AVD: " + portStr);
 
         Log.d(TAG, "Send replica to other nodes");
         replicate(key, value, replicateCount);
 
-        //return "Done";
+        return "Done";
     }
 
     public void insertToFs(String key, String value){
@@ -655,8 +658,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
 
         private void createNewThread(Socket socket){
-            //new Task().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, socket);
-            //task(socket);
             Thread t = new Thread(new Task(socket));
             t.start();
         }
@@ -707,10 +708,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                         response = queryRequest(parts[1]);
                         break;
                     case 2:
-                        insertRequest(parts[1]);
+                        response = insertRequest(parts[1]);
                         break;
                     case 3:
-                        replicateRequest(parts[1]);
+                        response = replicateRequest(parts[1]);
                         break;
                     case 4:
                         response = deleteRequest(parts[1]);
@@ -775,7 +776,7 @@ public class SimpleDynamoProvider extends ContentProvider {
          * @param incomingReq
          * @return
          */
-        private void insertRequest(String incomingReq) {
+        private String insertRequest(String incomingReq) {
             ;
             String[] parts = incomingReq.split(",");
             String key = parts[0].trim() + ";INSERT" ;
@@ -786,25 +787,28 @@ public class SimpleDynamoProvider extends ContentProvider {
             Uri uri = cp.buildUri();
 
             ContentValues cv = cp.buildContentValues(key, value);
-            getContext().getContentResolver().insert(uri, cv);
+            Uri returnUri = getContext().getContentResolver().insert(uri, cv);
             Log.d(TAG,"Insertion done");
+            return "Insert done";
         }
 
         /**
          * Handle incoming replication request.
          * @param incomingReq
          */
-        private void replicateRequest(String incomingReq){
+        private String replicateRequest(String incomingReq){
 
             String[] parts = incomingReq.split(",");
             String key = parts[0].trim();
             String value = parts[1].trim();
             int replicaCount = Integer.parseInt(parts[2]);
             Log.d(TAG, "Replicate request received from another AVD:" + parts[0]);
-            replicateInsert(key, value, replicaCount);
+            String response = replicateInsert(key, value, replicaCount);
             Log.d(TAG,"Replication done");
+            if (response != null)
+                return "Replicate Done";
 
-
+            return null;
         }
 
         private String deleteRequest(String incomingReq){

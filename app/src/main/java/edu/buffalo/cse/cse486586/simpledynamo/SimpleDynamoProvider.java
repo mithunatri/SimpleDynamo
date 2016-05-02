@@ -113,18 +113,13 @@ public class SimpleDynamoProvider extends ContentProvider {
      */
     private int transferDelete(String key, String storageNode){
         String nodeToQuery = convertToPort(storageNode);
-        /*new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
-                                                nodeToQuery, "DELETE", key);
 
-        sema_acquire(sema);
-
-        String response = getClientResponse();*/
-        Client client = new Client();
-        String response = client.send(nodeToQuery,"DELETE",key);
+        //Client client = new Client();
+        String response = new Client().send(nodeToQuery,"DELETE",key);
         if (response.isEmpty()) return 0;
 
         int deleteReplicaRows = Integer.parseInt(response);
-        //Release response sema?
+
         return deleteReplicaRows;
     }
 
@@ -273,7 +268,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         String replicaPort = convertToPort(node_ring.get(replicaIndex));
 
         Log.d(TAG, "Replicate Key-Value pair: " + key + "-" + value +
-                                            " to AVD: " + Integer.parseInt(replicaPort) / 2);
+                " to AVD: " + Integer.parseInt(replicaPort) / 2);
 
         if (--replicaCount > 0) {
             Log.d(TAG, "Replica count is: " + replicaCount);
@@ -334,7 +329,12 @@ public class SimpleDynamoProvider extends ContentProvider {
             return gdump(uri);
         }
         else if(key.equals("@")){
-            fileList = getContext().fileList();
+            try {
+                fileList = getContext().fileList();
+            }catch(NullPointerException e){
+                e.printStackTrace();
+                Log.e(TAG,"No files available");
+            }
         }
         else{
             if(parts.length == 1) {
@@ -346,10 +346,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                     return transferQuery(key, readNode);
             }
 
-            if(!checkKeyExists(key)){
+            /*if(!checkKeyExists(key)){
                 Log.d(TAG,"Key does not exist. I will wait till insertion is done");
                 blockTillInsert(key);
-            }
+            }*/
 
             fileList = new String[]{key};
         }
@@ -383,7 +383,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     private boolean checkKeyExists(String key){
         File directory = getContext().getFilesDir();
         File file = new File(directory.toString() + "/" + key);
-        Log.d(TAG,"File: " + file.toString());
+        Log.d(TAG, "File: " + file.toString());
         return file.exists();
     }
 
@@ -441,7 +441,7 @@ public class SimpleDynamoProvider extends ContentProvider {
      * @return
      */
     private Cursor gdump(Uri uri){
-        Log.d(TAG,"Global Dump starting at AVD: "  + portStr);
+        Log.d(TAG, "Global Dump starting at AVD: " + portStr);
         String gDumpResponse = "";
         Cursor cursor = getContext().getContentResolver().query(uri, null, "@", null, null);
 
@@ -463,7 +463,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.d(TAG, "gDump response from AVD " + node + " :" + response);
             if(!response.isEmpty())
                 gDumpResponse += response + ";";
-            //Release response Sema?
+
         }
 
         if(gDumpResponse == null || gDumpResponse.isEmpty())
@@ -495,7 +495,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             builder.add(KEY_FIELD, parts[0]);
             builder.add(VALUE_FIELD, parts[1]);
         }
-        //Release response semaphore?
+
         return mCursor;
     }
 
@@ -623,6 +623,58 @@ public class SimpleDynamoProvider extends ContentProvider {
         Log.d(TAG,"Acquired semaphore." + sema.toString());
     }
 
+
+    void runRecovery(){
+
+        int currentNodeIndex = node_ring.indexOf(portStr);
+        int predecessorIndex = (currentNodeIndex + node_ring.size() - 1) % node_ring.size();
+        int prePredecessorIndex = (currentNodeIndex + node_ring.size() - 2) % node_ring.size();
+        int successorIndex = (currentNodeIndex + 1) % node_ring.size();
+
+        String predecessorPort = node_ring.get(predecessorIndex);
+        String prePredecessorPort = node_ring.get(prePredecessorIndex);
+        String successorPort = node_ring.get(successorIndex);
+
+
+        //'@' query predecessor node.
+        String predecessorResponse = new Client().send(convertToPort(predecessorPort),"QUERY","@");
+        //'@' query successor node.
+        String successorResponse = new Client().send(convertToPort(successorPort), "QUERY", "@");
+
+        if(predecessorResponse == null && successorResponse == null) return;
+
+        if(predecessorResponse != null) {
+            String[] predecessorParts = predecessorResponse.split(";");
+            for (String keyValue : predecessorParts) {
+
+                String key = keyValue.split(",")[0];
+                String value = keyValue.split(",")[1];
+
+                String storageNode = determineStorageNode(key, value);
+                if (storageNode.equals(predecessorPort) || storageNode.equals(prePredecessorPort)) {
+                    insertToFs(key, value);
+                }
+
+            }
+        }
+
+        if(successorResponse != null) {
+            String[] successorParts = successorResponse.split(";");
+            for (String keyValue : successorParts) {
+
+                String key = keyValue.split(",")[0];
+                String value = keyValue.split(",")[1];
+
+                String storageNode = determineStorageNode(key, value);
+                if (storageNode.equals(portStr)) {
+                    insertToFs(key, value);
+                }
+            }
+        }
+    }
+
+
+
     //#--------------------------------------------------------------------------------------------#
     public class ServerTask extends AsyncTask<ServerSocket, String, Void> {
 
@@ -632,8 +684,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.d(TAG, "Server Task beginning...");
             msgType = new HashMap<String, Integer>();
             assignMsgTypes();
-
+            runRecovery();
             ServerSocket serverSocket = sockets[0];
+
             try {
                 while (true) {
 
@@ -689,7 +742,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         //@Override
         //protected Void doInBackground(Socket... sockets){
-        //private void task(Socket socket){
         @Override
         public void run(){
             Log.d(TAG,"Task starting...");
@@ -730,10 +782,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeUTF(response);
                 }
-                socket.close();
+                //socket.close();
             }catch(IOException e){
                 e.printStackTrace();
                 Log.e(TAG, "IOException. Reason: " + e.getLocalizedMessage());
+            }finally{
+                try{
+                    socket.close();
+                }catch(IOException e){
+                    e.printStackTrace();
+                }
             }
             Log.d(TAG,"Task Exiting...");
             //return null;
@@ -880,6 +938,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 Log.e(TAG, "IOException while delivering message. Reason: " +
                                                                         e.getLocalizedMessage());
                 e.printStackTrace();
+                handleFailure(message);
             }finally{
                 try{
                     socket.close();
@@ -891,16 +950,77 @@ public class SimpleDynamoProvider extends ContentProvider {
 
             return null;
         }
+
+        /**
+         * Query specific failure handling.
+         * @param message
+         */
+        private void handleFailure(String... message){
+            Log.d(TAG,"Query failed to send. Initiate failure handling...");
+
+            String origReadPort = message[0];
+            String msgType = message[1].trim();
+            String key = message[2].trim().split(",")[0];
+            String finalMessage = msgType + "|" + message[2] + "|" + portStr;
+
+            //Send to predecessor of Read (tail) Node.
+            String newNodePort = getNewNode(origReadPort);
+
+            Log.d(TAG,"Ready to send message to failure node's successor, i.e:" + newNodePort);
+            Log.d(TAG,"Final Failure Message to be sent: " + finalMessage);
+            Socket socket = null;
+            try{
+                socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                        Integer.parseInt(newNodePort));
+
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                DataInputStream in = new DataInputStream(socket.getInputStream());
+
+                out.writeUTF(finalMessage);
+
+                String response = in.readUTF();
+                Log.d(TAG, "Response received from " + newNodePort + " For " + key +
+                        " :Response: " + response);
+                response_map.get(key).setMessage(response);
+                Log.d(TAG, "Releasing semaphore");
+                response_map.get(key).sema.release();
+            }catch(IOException e){
+                Log.d(TAG, "WTH! Even handling failure failed! Sit and debug man!");
+                e.printStackTrace();
+            }finally{
+                try{
+                    socket.close();
+                    Log.d(TAG,"Client task (failure logic) closing..");
+                }catch(Exception e){
+                    e.printStackTrace();
+                }
+            }
+
+        }
+
+        /**
+         * Get predecessor node for Tail.
+         * @param port
+         * @return
+         */
+        private String getNewNode(String port){
+            String origReadNode = String.valueOf(Integer.parseInt(port) / 2);
+            int origNodeIndex = node_ring.indexOf(origReadNode);
+            int newNodeIndex = (origNodeIndex + node_ring.size() - 1) % node_ring.size();
+            String newNodePort = convertToPort(node_ring.get(newNodeIndex));
+
+            return newNodePort;
+        }
     }
 
 
-
-   public class Client{
+    //#--------------------------------------------------------------------------------------------#
+    public class Client{
 
        public String send(String node, String msgType, String content){
 
            Log.d(TAG,"Within Client send message (method)..");
-           String finalMessage = msgType + "|" + content;
+           String finalMessage = msgType + "|" + content + "|" + portStr;
 
            Log.d(TAG,"Final Message to be sent: " + finalMessage);
            Log.d(TAG, "Message Type: " + msgType);
@@ -923,6 +1043,10 @@ public class SimpleDynamoProvider extends ContentProvider {
            }catch(IOException e){
                Log.e(TAG, "IOException while delivering message. Reason: " + e.getLocalizedMessage());
                e.printStackTrace();
+               if(!msgType.equals("QUERY")) {
+                   String response = handleFailure(node, msgType, content);
+                   if (response != null) return response;
+               }
            }finally {
                try {
                    socket.close();
@@ -934,8 +1058,84 @@ public class SimpleDynamoProvider extends ContentProvider {
 
            return null;
        }
-   }
 
+       private String handleFailure(String port, String msgType, String content) {
+
+           if(msgType.equals("INSERT")){
+               Log.d(TAG,"Handling INSERT failure to port..." + port);
+
+               //Get new port to forward request to.
+               String newNodePort = getNewNode(port);
+
+               //Append replication factor as this will be a replication request.
+               String newContent = content + "," + String.valueOf(REPLICATION_FACTOR - 1) +
+                                ",insert-failure request";
+
+               String response = new Client().send(newNodePort,"REPLICATE",newContent);
+
+               return response;
+           }else if(msgType.equals("REPLICATE")){
+               Log.d(TAG,"Handling REPLICATE failure to port: " + port);
+               String[] parts = content.split(",");
+               int replication_count = Integer.parseInt(parts[2]);
+
+               //No need to do anything
+               if(replication_count == 1) return "Done";
+
+               String newNodePort = getNewNode(port);
+               //New Replication count will be 1, i.e. send to last replica node.
+               String newContent = parts[0] + "," + parts[1] + ",1,replication-fail request";
+
+               String response = new Client().send(newNodePort, "REPLICATE", newContent);
+
+               return response;
+
+           }else if(msgType.equals("DELETE")){
+               Log.d(TAG,"Handling DELETE failure to port..." + port);
+
+               //Get new port to forward request to.
+               String newNodePort = getNewNode(port);
+
+               //Append replication factor as this will be a delete replication request.
+               String newContent = content + "," + String.valueOf(REPLICATION_FACTOR - 1) +
+                       ",delete-failure request";
+
+               String response = new Client().send(newNodePort,"RDELETE",newContent);
+
+               return response;
+           }else if(msgType.equals("RDELETE")){
+               Log.d(TAG,"Handling RDELETE failure to port: " + port);
+
+               String[] parts = content.split(",");
+               int replication_count = Integer.parseInt(parts[1]);
+
+               //No need to do anything
+               if(replication_count == 1) return "0";
+
+               String newNodePort = getNewNode(port);
+               //New Replication count will be 1, i.e. send to last replica node.
+               String newContent = parts[0] + ",1,rdelete-fail request";
+
+               String response = new Client().send(newNodePort, "RDELETE", newContent);
+
+               return response;
+
+           }
+
+           return null;
+       }
+
+       private String getNewNode(String port){
+           String origNode = String.valueOf(Integer.parseInt(port) / 2);
+           int origNodeIndex = node_ring.indexOf(origNode);
+           int newNodeIndex = (origNodeIndex + 1) % node_ring.size();
+           String newNodePort = convertToPort(node_ring.get(newNodeIndex));
+
+           return newNodePort;
+       }
+    }
+
+   //#--------------------------------------------------------------------------------------------#
    public class Response{
        String message;
        Semaphore sema;
